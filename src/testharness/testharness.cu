@@ -37,7 +37,10 @@ extern unsigned long TestHarness(void (*sort)(unsigned short *, unsigned long))
 	return elapsed;
 }
 
-static unsigned int ReadToBuffer(unsigned short *buffer)
+/* Note that although the two functions below write to / read from unsigned int arrays,
+   the values they are reading and writing are at most two bytes long (unsigned short);
+   this is on purpose. */
+static unsigned long ReadToBuffer(unsigned short *buffer)
 {
 	int i;
 	int c1, c2;
@@ -49,17 +52,17 @@ static unsigned int ReadToBuffer(unsigned short *buffer)
 		c2 = getchar();
 		if (feof(stdin))
 			break;
-		*(buffer++) = (unsigned short)((c1 << 8) | c2);
+		*(buffer++) = (unsigned int)((c1 << 8) | c2) & 0xffff;
 	}
 	return i;
 }
 
-static void WriteFromBuffer(const unsigned short *buffer, unsigned int buffer_size)
+static void WriteFromBuffer(const unsigned short *buffer, unsigned long buffer_size)
 {
 	int i;
 
 	for (i = 0; i < buffer_size; i++) {
-		int val = *(buffer++);
+		unsigned int val = *(buffer++);
 		putchar((val >> 8) & 0xff);
 		putchar(val & 0xff);
 	}

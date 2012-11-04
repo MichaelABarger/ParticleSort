@@ -1,6 +1,5 @@
 #include <cuda.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include "testharness.h"
 
 __device__ unsigned short *global_mem;
@@ -15,7 +14,7 @@ __global__ void ParticleSort (unsigned short *global_mem, unsigned long total_si
 	unsigned short particle_value = global_mem[threadID];
 	int *particle_position, *slot;
         particle_position = slot = shared + 1 + threadID;
-	float particle_velocity = 1.0f - (particle_value & 0x0001) * 2.0f;
+	float particle_velocity = 8.0f - (particle_value & 0x0001) * 16.0f;
 
 	int is_idle = 0;
 
@@ -31,20 +30,20 @@ __global__ void ParticleSort (unsigned short *global_mem, unsigned long total_si
 
 		/* move non-idle particles */
 		if (!is_idle) {
-			if (particle_velocity < 0.3f) { /* idle particles that are too slow */
+			if (abs(particle_velocity) < 0.5f) { /* idle particles that are too slow */
 				/* (void) atomicAdd(shared, 1);*/
 				(*shared)++;
-				particle_velocity = 0.3f;
+				particle_velocity = 1.0f;
 				is_idle = 1;
 			} else { 
 				/* move particles that still have velocity */
-				particle_position += __float2int_ru(particle_velocity);
-				if (particle_position < shared + 1) {
-					particle_position = shared + 1;// do something
-					particle_velocity *= -0.8f;	
-				} else if (particle_position > shared + 2 * blockDim.x + 1) {
-					particle_position = shared + 2 * blockDim.x + 1;// do something
-					particle_velocity *= -0.8f;	
+				particle_position += __float2int_rn(particle_velocity);
+				if (particle_position < (shared + 1)) {
+					particle_position = shared + 1;
+					particle_velocity *= -0.9f;	
+				} else if (particle_position > (shared + 2 * blockDim.x + 1)) {
+					particle_position = shared + 2 * blockDim.x + 1;
+					particle_velocity *= -0.9f;	
 				}
 			}
 		}
@@ -56,12 +55,21 @@ __global__ void ParticleSort (unsigned short *global_mem, unsigned long total_si
 		__syncthreads();
 
 		/* do collisions */
-		particle_velocity *= copysignf(particle_value, particle_velocity) / *slot;
-		if (is_idle && particle_velocity > 0.3f) {
-			(*shared)--;
-			/*(void) atomicSub(shared, 1);*/
-			is_idle = 0;
+		if ((signbit(*particle_position) != signbit(particle_velocity)) || (abs(*particle_position) < abs(particle_value))) {
+			if (is_idle) {
+				(*shared)--;
+				is_idle = 0;
+			}
+			particle_velocity = copysignf(particle_velocity, particle_velocity) * 0.9f;
 		}
+/*
+		else if (is_idle && (*particle_position < 0)) {
+			(*shared)--;
+			/*(void) atomicSub(shared, 1);*//*
+			is_idle = 0;
+			particle_velocity = 
+		}
+		*/
 		__syncthreads();
 	} while (*shared < blockDim.x);
 

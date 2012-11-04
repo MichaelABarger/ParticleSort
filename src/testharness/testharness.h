@@ -9,7 +9,7 @@
 
 extern unsigned long TestHarness(void (*)(unsigned short *, unsigned long));
 static void FatalError(const char *);
-static unsigned int ReadToBuffer(unsigned short *);
-static void WriteFromBuffer(const unsigned short *, unsigned int);
+static unsigned long ReadToBuffer(unsigned short *);
+static void WriteFromBuffer(const unsigned short *, unsigned long);
 
 #endif
