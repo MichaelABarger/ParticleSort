@@ -5,7 +5,7 @@ CUDACOMP=nvcc
 CCOMP=gcc
 FLAGS=-arch=sm_11 -g -G
 
-all: particlesortExe filedump
+all: particlesortExe filedump genfile
 	rm *.o
 
 particlesortExe: particlesortO testharnessO
@@ -19,3 +19,6 @@ testharnessO:
 
 filedump:
 	$(CCOMP) src/testutil/filedump.c -o filedump
+
+genfile:
+	$(CCOMP) src/testutil/genfile.c -o genfile
