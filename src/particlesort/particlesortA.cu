@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include "../testharness/testharness.h"
 
-#define LIFESPAN 200
+#define LIFESPAN 50
 
 
 enum particleState { ALIVE, DYING, DEAD };
@@ -13,19 +13,19 @@ enum particleState { ALIVE, DYING, DEAD };
 
 __device__ unsigned short *global_mem;
 __device__ int *sums;
-__device__ int idle_ct = 0;
+__device__ int dead_ct = 0;
 
 __device__ void Collide (signed char *, short *, enum particleState *);
 __device__ void Pass (short *, enum particleState *);
 __device__ void Revive (signed char *, short *, enum particleState *, const signed char *);
-__device__ void Die (enum particleState *);
+__device__ void Die (signed char *, enum particleState *);
 
 
 
 #define COLLIDE Collide(&velocity,&momentum,&state)
 #define PASS Pass(&momentum,&state)
 #define REVIVE Revive(&velocity,&momentum,&state,&direction)
-#define DIE Die(&state)
+#define DIE Die(&velocity,&state)
 __global__ void ParticleSort (unsigned short *global_mem, int *sums, unsigned long size)
 {
 	//extern __shared__ int shmem [];
@@ -33,18 +33,18 @@ __global__ void ParticleSort (unsigned short *global_mem, int *sums, unsigned lo
 	int threadID = blockDim.x * blockIdx.x + threadIdx.x;
 
 	if (threadID == 0)
-		idle_ct = 0;
+		dead_ct = 0;
 	signed char direction = -1;
+
+	/* slot initialization */
+	int *here = sums + threadID;
 
 	/* particle initialization */
 	enum particleState state = ALIVE;
 	signed char velocity = 1 - (threadID & 0x01) * 2;
-	int *position = sums + threadID;
+	int *position = here;
 	unsigned int value = global_mem[threadID];
 	short momentum = LIFESPAN;
-
-	/* slot initialization */
-	int *here = position;
 
 	/* main sorting loop */
 	do {
@@ -66,16 +66,15 @@ __global__ void ParticleSort (unsigned short *global_mem, int *sums, unsigned lo
 			}
 		}
 
-		/* resolve collisions */
+		/* prepare collisions */
 		atomicAdd(position, ((state != DEAD) ? velocity : -direction) * value);
 		__syncthreads();
 		
+		/* resolve collisions */
 		int sum = *position;
-		int abs_sum = abs(sum);
-
 		switch (state) {
 		case DEAD:
-			if (direction && (sum != -direction * value) && (sum < 0))
+			if ((sum != -direction * value) && (sum <= 0))
 				REVIVE;
 			break;
 		case DYING:
@@ -88,12 +87,12 @@ __global__ void ParticleSort (unsigned short *global_mem, int *sums, unsigned lo
 				break;
 			if (sum <= 0) 
 				COLLIDE;
-			else 
-				PASS;
+			else if (sum > 0)
+				;//PASS;
 		}
 		__syncthreads();
 
-	} while (idle_ct < size);
+	} while (dead_ct < size);
 	__syncthreads();
 
 	/* we're done. copy everything back into global memory */
@@ -105,14 +104,15 @@ __global__ void ParticleSort (unsigned short *global_mem, int *sums, unsigned lo
 __device__ void Collide (signed char *velocity, short *momentum, enum particleState *state)
 {
 	*velocity = -(*velocity);
-	if (--(*momentum) <= 0)
+	if (--(*momentum) <= 0) {
 		*state = DYING;
+		*momentum = 0;
+	}
 }
 
 __device__ void Pass (short *momentum, enum particleState *state)
 {
-	//*momentum = min(*momentum + 1, LIFESPAN);
-	++(*momentum);
+	*momentum = min(*momentum + 1, LIFESPAN);
 	*state = ALIVE;
 }
 
@@ -121,13 +121,14 @@ __device__ void Revive (signed char *velocity, short *momentum, enum particleSta
 	*momentum = 0;
 	*velocity = *direction;
 	*state = DYING;
-	atomicAdd(&idle_ct, -1);
+	atomicAdd(&dead_ct, -1);
 }
 
-__device__ void Die (enum particleState *state)
+__device__ void Die (signed char *velocity, enum particleState *state)
 {
+	*velocity = 0;
 	*state = DEAD;
-	atomicAdd(&idle_ct, 1);
+	atomicAdd(&dead_ct, 1);
 }
 
 
