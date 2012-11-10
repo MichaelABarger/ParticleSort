@@ -7,11 +7,15 @@
 #include <sys/time.h>
 #include "testharness.h"
 
-extern unsigned long TestHarness(void (*sort)(unsigned short *, unsigned long))
+static void FatalError(const char *);
+static unsigned long ReadToBuffer(unsigned int *);
+static void WriteFromBuffer(const unsigned int *, unsigned long);
+
+extern unsigned long TestHarness(void (*sort)(unsigned int *, unsigned long))
 {
 	struct timeval tv;
 	unsigned long starttime, endtime, elapsed;
-	unsigned short *buffer = (unsigned short *)malloc(MAX_BUFFER_SIZE * 2);
+	unsigned int *buffer = (unsigned int *)malloc(MAX_BUFFER_SIZE * sizeof(int));
 
 	/* start timer */
 	gettimeofday(&tv, NULL);
@@ -40,10 +44,10 @@ extern unsigned long TestHarness(void (*sort)(unsigned short *, unsigned long))
 /* Note that although the two functions below write to / read from unsigned int arrays,
    the values they are reading and writing are at most two bytes long (unsigned short);
    this is on purpose. */
-static unsigned long ReadToBuffer(unsigned short *buffer)
+static unsigned long ReadToBuffer(unsigned int *buffer)
 {
 	int i;
-	int c1, c2;
+	unsigned int c1, c2, c3, c4;
 
 	for (i = 0; i < MAX_BUFFER_SIZE; i++) {
 		c1 = getchar();
@@ -52,17 +56,25 @@ static unsigned long ReadToBuffer(unsigned short *buffer)
 		c2 = getchar();
 		if (feof(stdin))
 			break;
-		*(buffer++) = (unsigned int)((c1 << 8) | c2) & 0xffff;
+		c3 = getchar();
+		if (feof(stdin))
+			break;
+		c4 = getchar();
+		if (feof(stdin))
+			break;
+		*(buffer++) = (c1 << 24) | (c2 << 16) | (c3 << 8) | c4;
 	}
 	return i;
 }
 
-static void WriteFromBuffer(const unsigned short *buffer, unsigned long buffer_size)
+static void WriteFromBuffer(const unsigned int *buffer, unsigned long buffer_size)
 {
 	int i;
 
 	for (i = 0; i < buffer_size; i++) {
 		unsigned int val = *(buffer++);
+		putchar((val >> 24) & 0xff);
+		putchar((val >> 16) & 0xff);
 		putchar((val >> 8) & 0xff);
 		putchar(val & 0xff);
 	}
