@@ -57,13 +57,17 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 	__shared__ unsigned int left_outgoing [BUFFER_SIZE];
 	__shared__ unsigned int right_incoming [BUFFER_SIZE];
 	__shared__ unsigned int right_outgoing [BUFFER_SIZE];
-	__shared__ unsigned int *cur_left_incoming, *cur_left_outgoing,
-		 			 *cur_right_incoming, *cur_right_outgoing;
 	__shared__ unsigned int isNotComplete;
 
 
 	/* define registers */
 	const int absThreadID = blockIdx.x * blockDim.x + threadIdx.x;
+
+	/* these are only used by a couple of threads . . . */
+	unsigned int *cur_left_incoming = left_incoming + BUFFER_SIZE;
+	unsigned int *cur_left_outgoing = left_outgoing + BUFFER_SIZE;
+	unsigned int *cur_right_incoming = right_incoming;
+	unsigned int *cur_right_outgoing = right_outgoing;
 	
 	struct particle going_left, going_right;
 
@@ -74,6 +78,13 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 	else if (threadIdx.x == 0) role = LEFT;
 	else if (threadIdx.x == blockDim.x - 1) role = RIGHT;
 	else role = MIDDLE;
+
+	enum {LBUFF, NONE, RBUFF} buff_role;
+	if ((blockIdx.x > 0) && (threadIdx.x < 16))
+		buff_role = LBUFF;
+	else if ((blockIdx.x < gridDim.x - 1) && (threadIdx.x >= (blockDim.x - 16)))
+		buff_role = RBUFF;
+	else buff_role = NONE;
 
 	volatile unsigned int *const here = beginning + threadIdx.x;
 
@@ -126,6 +137,13 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 			__syncthreads();
 			// prepare for moving right
 			switch (role) {
+			case LEFT:
+				*here = *(cur_left_incoming--);
+				break;
+			case RIGHT:
+				WriteParticle(&going_right, cur_right_outgoing);
+				++cur_right_outgoing;
+				break;
 			case BEGINNING:
 				if (going_left.color)
 					DECREASE_MOMENTUM(going_left);
@@ -154,6 +172,13 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 			__syncthreads();
 			// prepare for moving left
 			switch (role) {
+			case LEFT:
+				WriteParticle(&going_left, cur_left_outgoing);
+				--cur_left_outgoing;
+				break;
+			case RIGHT:
+				*here = *(cur_right_incoming++);
+				break;
 			case END:
 				if (going_right.color)
 					DECREASE_MOMENTUM(going_right);
@@ -164,10 +189,33 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 				WriteParticle(&going_left, here - 1);
 			}
 		}
-		++i;
 		if ((role != IDLE) && !resident)
 			isNotComplete = TRUE;
 		__syncthreads();
+		if (i & 0xF == 0) {
+			switch (buff_role) {
+			case LBUFF:
+				while (buffer_flags[(blockIdx.x - 1) * 2 + 1]); /*busy wait*/
+				left_incoming[threadIdx.x] = transblock_buffers[(blockIdx.x - 1) * (2 * BUFFER_SIZE) + threadIdx.x];
+				transblock_buffers[(blockIdx.x - 1) * (2 * BUFFER_SIZE) + BUFFER_SIZE + threadIdx.x] = left_outgoing[threadIdx.x];
+				atomicExch(buffer_flags + (blockIdx.x - 1) * 2, 0);
+				atomicExch(buffer_flags + (blockIdx.x - 1) * 2 + 1, 1);
+				cur_left_incoming = left_incoming + BUFFER_SIZE;
+				cur_left_outgoing = left_outgoing + BUFFER_SIZE;
+				break;
+			case RBUFF:
+				while (buffer_flags[blockIdx.x * 2]); /*busy wait*/
+				transblock_buffers[blockIdx.x * (2 * BUFFER_SIZE) + threadIdx.x] = right_outgoing[threadIdx.x];
+				right_incoming[threadIdx.x] = transblock_buffers[blockIdx.x * (2 * BUFFER_SIZE) + BUFFER_SIZE + threadIdx.x];
+				atomicExch(buffer_flags + blockIdx.x * 2, 1);
+				atomicExch(buffer_flags + blockIdx.x * 2 + 1, 0);
+				cur_right_incoming = right_incoming;
+				cur_right_outgoing = right_outgoing;
+				break;
+			}	
+		}
+		__syncthreads();
+		++i;
 	} while (isNotComplete);
 
 	/* read sorted values back to array */
