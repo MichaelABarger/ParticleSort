@@ -46,6 +46,8 @@ static __device__ void Bump (struct particle *, unsigned int *);
 static __device__ void Reside (struct particle *, unsigned int *);
 static __device__ void Swap (struct particle *, struct particle *);
 
+static __device__ int blocksComplete = 0;
+
 extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 					 unsigned int *transblock_buffers,
 					 unsigned int *buffer_flags,
@@ -58,6 +60,7 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 	__shared__ unsigned int right_incoming [BUFFER_SIZE];
 	__shared__ unsigned int right_outgoing [BUFFER_SIZE];
 	__shared__ unsigned int isNotComplete;
+	__shared__ unsigned int wasComplete;
 
 
 	/* define registers */
@@ -102,6 +105,7 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 	}
 	switch (role) {
 	case BEGINNING:
+	case LEFT:
 		*here = 0;
 		// fall through
 	case MIDDLE:
@@ -110,8 +114,10 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 	resident = 0;
 	__syncthreads();
 
+	if (threadIdx.x == 0)
+		wasComplete = FALSE;
 
-
+do {
 	/* sorting loop */
 	do {
 		if (role == BEGINNING)
@@ -189,9 +195,13 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 				WriteParticle(&going_left, here - 1);
 			}
 		}
-		if ((role != IDLE) && !resident)
+		if ((role != IDLE) && !resident) {
 			isNotComplete = TRUE;
-		__syncthreads();
+			if (wasComplete) {
+				wasComplete = FALSE;
+				atomicAdd(&blocksComplete, -1);
+			}
+		}
 		if (i & 0xF == 0) {
 			switch (buff_role) {
 			case LBUFF:
@@ -217,6 +227,9 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 		__syncthreads();
 		++i;
 	} while (isNotComplete);
+wasComplete = TRUE;
+atomicAdd(&blocksComplete, 1);
+} while (blocksComplete < gridDim.x);
 
 	/* read sorted values back to array */
 	if (role != IDLE)
@@ -278,7 +291,7 @@ __device__ unsigned int *buffer_flags;
 
 extern "C" void sort (unsigned int *buffer, unsigned long size)
 {
-	dim3 grid (1);
+	dim3 grid ((size - 1) / BLOCK + 1);
 	dim3 block (BLOCK);
 	size_t global_mem_size = size * sizeof(int);
 	size_t transblock_buffers_size = BUFFER_SIZE * (block.x - 1) * sizeof(int);
