@@ -67,19 +67,17 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 	__shared__ unsigned int isNotComplete;
 	__shared__ unsigned int wasComplete;
 	__shared__ unsigned int cur_L_incoming_written, cur_L_incoming_read;
-	__shared__ unsigned int cur_L_outgoing_written, cur_L_outgoing_read;
+	__shared__ unsigned int cur_L_outgoing_written;
 	__shared__ unsigned int cur_R_incoming_written, cur_R_incoming_read;
-	__shared__ unsigned int cur_R_outgoing_written, cur_R_outgoing_read;
-	__shared__ unsigned int global_L_buffer_read, global_R_buffer_read;
+	__shared__ unsigned int cur_R_outgoing_written;
 
 
 	/* define registers */
 	const int absThreadID = blockIdx.x * blockDim.x + threadIdx.x;
 
 	if (threadIdx.x == 0) {
-		cur_L_incoming_written = cur_L_incoming_read = cur_L_outgoing_written = cur_L_outgoing_read =
-			cur_R_incoming_written = cur_R_incoming_read = cur_R_outgoing_written = cur_R_outgoing_read =
-			global_L_buffer_read = global_R_buffer_read = 0;
+		cur_L_incoming_written = cur_L_incoming_read = cur_L_outgoing_written = cur_R_incoming_written
+			= cur_R_incoming_read = cur_R_outgoing_written = 0;
 	}
 	unsigned int *const global_left_incoming_buffer = transblock_buffers + (blockIdx.x-1) * _2XBUFFER_SIZE;
 	unsigned int *const global_left_outgoing_buffer = transblock_buffers + (blockIdx.x-1) * _2XBUFFER_SIZE + BUFFER_SIZE;
@@ -221,12 +219,12 @@ do {
 				atomicAdd(&blocksComplete, -1);
 			}
 		}
-		if ((++i & 0xF) == 0) {
+		if ((++i & 0x1F) == 0) {
 			switch (buff_role) {
 			case LBUFF:		
 				global_left_outgoing_buffer[(*global_left_outgoing_counter + threadIdx.x) & BUFFER_MOD]
 					= left_outgoing[(cur_L_outgoing_written - TRANSFER_SIZE + 1 + threadIdx.x) & BUFFER_MOD];
-				if (role == LEFT)
+				if (role == LEFT) 
 					atomicAdd(global_left_outgoing_counter, TRANSFER_SIZE);
 				if (*global_left_incoming_counter > cur_L_incoming_written) {
 					left_incoming[(cur_L_incoming_written+threadIdx.x)&BUFFER_MOD]
@@ -239,7 +237,7 @@ do {
 				global_right_outgoing_buffer[(*global_right_outgoing_counter-blockDim.x+TRANSFER_SIZE+threadIdx.x)&BUFFER_MOD]
 					= left_outgoing[(cur_R_outgoing_written-TRANSFER_SIZE+1-blockDim.x+TRANSFER_SIZE+threadIdx.x)&BUFFER_MOD];
 				if (role == RIGHT)
-					atomicAdd(global_right_outgoing_counter, 1);
+					atomicAdd(global_right_outgoing_counter, TRANSFER_SIZE);
 				if (*global_right_incoming_counter > cur_R_incoming_written) {
 					right_incoming[(cur_R_incoming_written-blockDim.x+TRANSFER_SIZE+threadIdx.x)&BUFFER_MOD]
 						= global_right_incoming_buffer[(*global_right_incoming_counter-TRANSFER_SIZE+1+threadIdx.x)&BUFFER_MOD];
@@ -334,10 +332,18 @@ extern "C" void sort (unsigned int *buffer, unsigned long size)
 	ParticleSort<<<grid, block>>>(global_mem, transblock_buffers, buffer_flags, size);
 	ErrorCheck(cudaMemcpy(buffer, global_mem, global_mem_size, cudaMemcpyDeviceToHost),
 			"cudaMemcpy device->host");
+#ifdef DEBUG
+	unsigned int *buff_ct = (unsigned int *)malloc(buffer_flags_size);
+	cudaMemcpy(buff_ct, buffer_flags, buffer_flags_size, cudaMemcpyDeviceToHost);
+	fprintf(stderr, "Buffer 1 ct A: %u, ct B: %u\n", buff_ct[0], buff_ct[1]);
+
+	free(buff_ct);
+#endif
 
 	ErrorCheck(cudaFree(global_mem), "cudaFree global");
 	ErrorCheck(cudaFree(transblock_buffers), "cudaFree buffers");
 	ErrorCheck(cudaFree(buffer_flags), "cudaFree buffer-flags");
+
 }
 
 static void ErrorCheck (cudaError_t cerr, const char *str)
