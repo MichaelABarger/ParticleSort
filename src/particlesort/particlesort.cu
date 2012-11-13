@@ -11,6 +11,8 @@
 #ifndef PARTICLESORT_CU
 #define PARTICLESORT_CU
 
+#define DEBUG
+
 #include <cuda.h>
 #include <stdio.h>
 #include "../testharness/testharness.h"
@@ -48,6 +50,7 @@ static __device__ void Reside (struct particle *, unsigned int *);
 static __device__ void Swap (struct particle *, struct particle *);
 
 static __device__ int blocksComplete = 0;
+
 
 extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 					 unsigned int *transblock_buffers,
@@ -94,17 +97,6 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 	else if ((blockIdx.x < gridDim.x - 1) && (threadIdx.x >= (blockDim.x - BUFFER_SIZE)))
 		buff_role = RBUFF;
 	else buff_role = NONE;
-
-	switch (buff_role) {
-	case LBUFF:
-		left_incoming[threadIdx.x] = 0;
-		left_outgoing[threadIdx.x] = 0;
-		break;
-	case RBUFF:
-		right_incoming[threadIdx.x-blockDim.x+BUFFER_SIZE] = 0;
-		right_outgoing[threadIdx.x-blockDim.x+BUFFER_SIZE] = 0;
-		break;
-	}
 
 	volatile unsigned int *const here = beginning + threadIdx.x;
 
@@ -219,18 +211,18 @@ do {
 				atomicAdd(&blocksComplete, -1);
 			}
 		}
-		if (++i & 0xF == 0) {
+		if ((++i & 0xF) == 0) {
 			switch (buff_role) {
 			case LBUFF:
-				while (buffer_flags[(blockIdx.x-1)*2+1]); /*busy wait*/ 
+				while (buffer_flags[(blockIdx.x-1) * 2 + 1]); /*busy wait*/ 
 				left_incoming[threadIdx.x] = transblock_buffers[(blockIdx.x-1)*_2XBUFFER_SIZE+threadIdx.x];
 				transblock_buffers[(blockIdx.x-1)*_2XBUFFER_SIZE+threadIdx.x] = 0;
-				transblock_buffers[(blockIdx.x - 1) * _2XBUFFER_SIZE + BUFFER_SIZE + threadIdx.x] = left_outgoing[threadIdx.x];
-				atomicExch(buffer_flags + (blockIdx.x - 1) * 2, 0);
-				atomicExch(buffer_flags + (blockIdx.x - 1) * 2 + 1, 1);
+				transblock_buffers[(blockIdx.x-1)*_2XBUFFER_SIZE+BUFFER_SIZE+threadIdx.x] = left_outgoing[threadIdx.x];
+				atomicExch(buffer_flags + (blockIdx.x-1) * 2 + 1, 1);
+				atomicExch(buffer_flags + (blockIdx.x-1) * 2, 0);
 				break;
 			case RBUFF:
-				while (buffer_flags[blockIdx.x*2]); /*busy wait*/
+				while (buffer_flags[blockIdx.x * 2]); /*busy wait*/
 				transblock_buffers[blockIdx.x*_2XBUFFER_SIZE+threadIdx.x-blockDim.x+BUFFER_SIZE] = right_outgoing[threadIdx.x-blockDim.x+BUFFER_SIZE];
 				right_incoming[threadIdx.x-blockDim.x+BUFFER_SIZE] =
 					transblock_buffers[blockIdx.x*_2XBUFFER_SIZE+BUFFER_SIZE+threadIdx.x-blockDim.x+BUFFER_SIZE];
@@ -316,8 +308,8 @@ extern "C" void sort (unsigned int *buffer, unsigned long size)
 	dim3 grid ((size - 1) / BLOCK + 1);
 	dim3 block (BLOCK);
 	size_t global_mem_size = size * sizeof(int);
-	size_t transblock_buffers_size = _2XBUFFER_SIZE * (block.x - 1) * sizeof(int);
-	size_t buffer_flags_size = (block.x - 1) * 2 * sizeof(int);
+	size_t transblock_buffers_size = _2XBUFFER_SIZE * (grid.x - 1) * sizeof(int);
+	size_t buffer_flags_size = (grid.x - 1) * 2 * sizeof(int);
 
 	ErrorCheck(cudaMalloc(&global_mem, global_mem_size), "cudaMalloc global");
 	ErrorCheck(cudaMemcpy(global_mem, buffer, global_mem_size, cudaMemcpyHostToDevice),
