@@ -170,12 +170,14 @@ do {
 			case LEFT:
 				if (cur_L_incoming_read < cur_L_incoming_written)
 					*here = left_incoming[cur_L_incoming_read++ & BUFFER_MOD];
+				WriteParticle(&going_right, here + 1);
 #ifdef DEBUG
 				atomicAdd(&buffer_read, 1);
 #endif
 				break;
 			case RIGHT:
 				WriteParticle(&going_right, right_outgoing + (cur_R_outgoing_written++ & BUFFER_MOD));
+				RESET(going_right);
 				break;
 			case BEGINNING:
 				if (going_left.color)
@@ -207,10 +209,12 @@ do {
 			switch (role) {
 			case LEFT:
 				WriteParticle(&going_left, left_outgoing + (cur_L_outgoing_written++ & BUFFER_MOD));
+				RESET(going_left);
 				break;
 			case RIGHT:
-				if (cur_R_incoming_read < cur_R_incoming_written)
+				if (cur_R_incoming_read < cur_R_incoming_written) 
 					*here = right_incoming[cur_R_incoming_read++ & BUFFER_MOD];
+				WriteParticle(&going_left, here - 1);
 #ifdef DEBUG
 				atomicAdd(&buffer_read, 1);
 #endif
