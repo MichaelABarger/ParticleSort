@@ -288,12 +288,12 @@ extern "C" void sort (unsigned int *buffer, unsigned long size)
 
 	ErrorCheck(cudaMalloc(&global_mem, transfer_size), "cudaMalloc global");
 	ErrorCheck(cudaMemcpy(global_mem, buffer, transfer_size, cudaMemcpyHostToDevice),
-			"cudaMemcpy device->host");
+			"cudaMemcpy host->device");
 
 	ParticleSort<<<grid, block>>>(global_mem, size);
 
 	ErrorCheck(cudaMemcpy(buffer, global_mem, transfer_size, cudaMemcpyDeviceToHost),
-			"cudaMemcpy host->device");
+			"cudaMemcpy device->host");
 	ErrorCheck(cudaFree(global_mem), "cudaFree global");
 
 #ifdef DEBUG

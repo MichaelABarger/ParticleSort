@@ -3,7 +3,7 @@
 
 CUDACOMP=nvcc
 CCOMP=gcc
-FLAGS=-arch=sm_11 -O1 -Xopencc -O1 -Xptxas -O1
+FLAGS=-arch=sm_11 -O0 -Xopencc -O0 -Xptxas -O0 
 
 all: particlesortExe testharnesstest filedump genfile emptykernel particlesort1block
 	rm *.o

@@ -1,7 +1,7 @@
 #ifndef TESTHARNESS_H
 #define TESTHARNESS_H
 
-#define MAX_BUFFER_SIZE 512
+#define MAX_BUFFER_SIZE 10000
 
 #define EXIT__SUCCESS 0
 #define EXIT__ERR -1
