@@ -16,6 +16,7 @@
 #include "../testharness/testharness.h"
 
 #define BLOCK 512
+#define BUFFER_SIZE 16
 #define MAX_MOMENTUM 0xF
 #define MOMENTUM_INIT 0xF0000000
 #define MOMENTUM_WIDTH 4
@@ -43,24 +44,35 @@ static __device__ void WriteParticle (const struct particle *, volatile unsigned
 static __device__ void Collide (struct particle *, struct particle *);
 static __device__ void Bump (struct particle *, unsigned int *);
 static __device__ void Reside (struct particle *, unsigned int *);
+static __device__ void Swap (struct particle *, struct particle *);
 
 extern "C" __global__ void ParticleSort (unsigned int *global_mem,
+					 unsigned int *transblock_buffers,
+					 unsigned int *buffer_flags,
 					 unsigned long size)
 {
 	/* define shared memory */
 	volatile __shared__ unsigned int beginning [BLOCK];
-	volatile __shared__ unsigned int isNotComplete;
+	__shared__ unsigned int left_incoming [BUFFER_SIZE];
+	__shared__ unsigned int left_outgoing [BUFFER_SIZE];
+	__shared__ unsigned int right_incoming [BUFFER_SIZE];
+	__shared__ unsigned int right_outgoing [BUFFER_SIZE];
+	__shared__ unsigned int *cur_left_incoming, *cur_left_outgoing,
+		 			 *cur_right_incoming, *cur_right_outgoing;
+	__shared__ unsigned int isNotComplete;
 
 
 	/* define registers */
 	const int absThreadID = blockIdx.x * blockDim.x + threadIdx.x;
-	const int end = min(blockDim.x - 1, (int)size - 1);
 	
 	struct particle going_left, going_right;
 
-	enum {BEGINNING, MIDDLE, END} role;
-	if (threadIdx.x == 0) role = BEGINNING;
-	else if (threadIdx.x == end) role = END;
+	enum {BEGINNING, LEFT, MIDDLE, RIGHT, END, IDLE} role;
+	if (absThreadID == 0) role = BEGINNING;
+	else if (absThreadID == size - 1) role = END;
+	else if (absThreadID >= size) role = IDLE;
+	else if (threadIdx.x == 0) role = LEFT;
+	else if (threadIdx.x == blockDim.x - 1) role = RIGHT;
 	else role = MIDDLE;
 
 	volatile unsigned int *const here = beginning + threadIdx.x;
@@ -69,13 +81,13 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 	signed char i = 0;
 
 
-
-
 	/* initial coalesced global memory read */
-	resident = MOMENTUM_INIT | (global_mem[absThreadID] + 1);
-	if (threadIdx.x & 0x01) {
-		ReadParticle(resident, &going_left);
-		resident = 0;
+	if (role != IDLE) {
+		resident = MOMENTUM_INIT | (global_mem[absThreadID] + 1);
+		if (threadIdx.x & 0x01 || role == END) {
+			ReadParticle(resident, &going_left);
+			resident = 0;
+		}
 	}
 	switch (role) {
 	case BEGINNING:
@@ -85,28 +97,32 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 		*(here + 1) = resident;
 	}
 	resident = 0;
+	__syncthreads();
 
 
 
 	/* sorting loop */
 	do {
-		if (threadIdx.x == 0)
+		if (role == BEGINNING)
 			isNotComplete = FALSE;
 
 		// non-diverging conditional
-		if (i++ & 0x01) { // if moving left
+		if (i & 0x01) { // if moving left
+			if (role != IDLE) {
+				ReadParticle(*here, &going_left);
 
-			ReadParticle(*here, &going_left);
-
-			if (going_left.color) {
-				if (going_right.color)
-					Collide(&going_left, &going_right);
-				if (resident && (going_left.color < resident))
-					Bump(&going_left, &resident);
-				else if (!resident && !going_right.color && !going_left.momentum)
-					Reside(&going_left, &resident);
+				if (going_left.color) {
+					if (going_right.color)
+						Collide(&going_left, &going_right);
+					if (resident) {
+						if (going_left.color > resident)
+							Bump(&going_left, &resident);
+					} else {
+						if (!going_right.color && !going_left.momentum)
+							Reside(&going_left, &resident);
+					}
+				}
 			}
-
 			__syncthreads();
 			// prepare for moving right
 			switch (role) {
@@ -120,18 +136,21 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 				WriteParticle(&going_right, here + 1);
 			}
 		} else { // if moving right
+			if (role != IDLE) {
+				ReadParticle(*here, &going_right);
 
-			ReadParticle(*here, &going_right);
-
-			if (going_right.color) {
-				if (going_left.color)
-					Collide(&going_left, &going_right);
-				if (resident && (going_right.color > resident))
-					Bump(&going_right, &resident);
-				else if (!resident && !going_left.color && !going_right.momentum)
-					Reside(&going_right, &resident);
+				if (going_right.color) {
+					if (going_left.color)
+						Collide(&going_left, &going_right);
+					if (resident) {
+						if (going_right.color < resident)
+							Bump(&going_right, &resident);
+					} else {
+						if (!going_left.color && !going_right.momentum)
+							Reside(&going_right, &resident);
+					}
+				}
 			}
-
 			__syncthreads();
 			// prepare for moving left
 			switch (role) {
@@ -145,14 +164,15 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 				WriteParticle(&going_left, here - 1);
 			}
 		}
-		if (!resident)
+		++i;
+		if ((role != IDLE) && !resident)
 			isNotComplete = TRUE;
 		__syncthreads();
 	} while (isNotComplete);
 
-
 	/* read sorted values back to array */
-	global_mem[absThreadID] = ((resident - 1) & COLOR_MASK);
+	if (role != IDLE)
+		global_mem[absThreadID] = ((resident - 1) & COLOR_MASK);
 }
 
 static __device__ void ReadParticle (const unsigned int src, struct particle *dest)
@@ -174,12 +194,7 @@ static __device__ void Collide (struct particle *L, struct particle *R)
 	} else {
 		DECREASE_MOMENTUM_PTR(L);
 		DECREASE_MOMENTUM_PTR(R);
-		L->color ^= R->color;
-		R->color ^= L->color;
-		L->color ^= R->color;
-		L->momentum ^= R->momentum;
-		R->momentum ^= L->momentum;
-		L->momentum ^= R->momentum;
+		Swap(L, R);
 	}
 }
 
@@ -197,28 +212,48 @@ static __device__ void Reside (struct particle *incoming, unsigned int *resident
 	incoming->color = 0;
 }
 
+static __device__ void Swap (struct particle *L, struct particle *R)
+{
+		L->color ^= R->color;
+		R->color ^= L->color;
+		L->color ^= R->color;
+		L->momentum ^= R->momentum;
+		R->momentum ^= L->momentum;
+		L->momentum ^= R->momentum;
+}
 
 /// CUDA HOST /////////////////////////////////////////////////////////////////////////////
 static void ErrorCheck (cudaError_t cerr, const char *str);
 __device__ unsigned int *global_mem;
+__device__ unsigned int *transblock_buffers;
+__device__ unsigned int *buffer_flags;
 
 extern "C" void sort (unsigned int *buffer, unsigned long size)
 {
 	dim3 grid (1);
-	dim3 block (size);
-	size_t transfer_size = size * sizeof(int);
+	dim3 block (BLOCK);
+	size_t global_mem_size = size * sizeof(int);
+	size_t transblock_buffers_size = BUFFER_SIZE * (block.x - 1) * sizeof(int);
+	size_t buffer_flags_size = (block.x - 1) * sizeof(int) * 2;
 
-	ErrorCheck(cudaMalloc(&global_mem, transfer_size), "cudaMalloc global");
-	ErrorCheck(cudaMemcpy(global_mem, buffer, transfer_size, cudaMemcpyHostToDevice),
+	ErrorCheck(cudaMalloc(&global_mem, global_mem_size), "cudaMalloc global");
+	ErrorCheck(cudaMemcpy(global_mem, buffer, global_mem_size, cudaMemcpyHostToDevice),
 			"cudaMemcpy device->host");
 
-	ParticleSort<<<grid, block>>>(global_mem, size);
-	cudaThreadSynchronize();
-	ErrorCheck(cudaGetLastError(), "kernel execution");
-	
-	ErrorCheck(cudaMemcpy(buffer, global_mem, transfer_size, cudaMemcpyDeviceToHost),
+	ErrorCheck(cudaMalloc(&transblock_buffers, transblock_buffers_size), "cudaMalloc buffers");
+	ErrorCheck(cudaMemset(transblock_buffers, 0, transblock_buffers_size), "cudaMemset buffers");
+	ErrorCheck(cudaMalloc(&buffer_flags, buffer_flags_size), "cudaMalloc buffer-flags");
+	ErrorCheck(cudaMemset(buffer_flags, 0, buffer_flags_size), "cudaMemset buffer-flags");
+
+	ParticleSort<<<grid, block>>>(global_mem, transblock_buffers, buffer_flags, size);
+	ErrorCheck(cudaMemcpy(buffer, global_mem, global_mem_size, cudaMemcpyDeviceToHost),
 			"cudaMemcpy host->device");
+
 	ErrorCheck(cudaFree(global_mem), "cudaFree global");
+	ErrorCheck(cudaFree(transblock_buffers), "cudaFree buffers");
+	ErrorCheck(cudaFree(buffer_flags), "cudaFree buffer-flags");
+
+
 }
 
 static void ErrorCheck (cudaError_t cerr, const char *str)
@@ -227,7 +262,6 @@ static void ErrorCheck (cudaError_t cerr, const char *str)
 	fprintf(stderr, "CUDA Runtime Error: %s\n at %s\n", cudaGetErrorString(cerr), str);
 	exit(EXIT_FAILURE);
 }
-
 
 /// MAIN //////////////////////////////////////////////////////////////////////////////////
 int main (int argc, char **argv)

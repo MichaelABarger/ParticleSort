@@ -3,25 +3,26 @@
 
 CUDACOMP=nvcc
 CCOMP=gcc
-FLAGS=-arch=sm_11 -g -G
+FLAGS=-arch=sm_11 -O1 -Xopencc -O1 -Xptxas -O1
 
-all: particlesortExe filedump genfile
+all: particlesortExe testharnesstest filedump genfile emptykernel particlesort1block
 	rm *.o
 
-particlesortExe: particlesortAO particlesortBO particlesortCO testharnessO
-	$(CUDACOMP) $(FLAGS) particlesortA.o testharness.o -o particlesortA
-	$(CUDACOMP) $(FLAGS) particlesortB.o testharness.o -o particlesortB
-	$(CUDACOMP) $(FLAGS) particlesortC.o testharness.o -o particlesortC
+particlesortExe: particlesortO testharnessO
+	$(CUDACOMP) $(FLAGS) particlesort.o testharness.o -o particlesort
 
-particlesortAO:
-	$(CUDACOMP) $(FLAGS) -c src/particlesort/particlesortA.cu 
+particlesort1block: testharnessO
+	$(CUDACOMP) $(FLAGS) src/particlesort/particlesort-1block.cu testharness.o -o particlesort-1block
+
+emptykernel: testharnessO
+	$(CUDACOMP) $(FLAGS) src/particlesort/emptykernel.cu testharness.o -o emptykernel
+
+particlesortO:
+	$(CUDACOMP) $(FLAGS) -c src/particlesort/particlesort.cu 
+
+testharnesstest: testharnessO
+	$(CUDACOMP) $(FLAGS) testharness.o src/testharness/testharnesstest.cu -o testharnesstest
 	
-particlesortBO:
-	$(CUDACOMP) $(FLAGS) -c src/particlesort/particlesortB.cu 
-
-particlesortCO:
-	$(CUDACOMP) $(FLAGS) -c src/particlesort/particlesortC.cu 
-
 testharnessO:
 	$(CUDACOMP) $(FLAGS) -c src/testharness/testharness.cu 
 
