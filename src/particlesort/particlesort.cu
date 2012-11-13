@@ -17,8 +17,10 @@
 #include <stdio.h>
 #include "../testharness/testharness.h"
 
-#define BLOCK 512
-#define BUFFER_SIZE 16
+#define BLOCK 416
+#define BUFFER_SIZE 256
+#define TRANSFER_SIZE 16
+#define BUFFER_MOD 255
 #define _2XBUFFER_SIZE (BUFFER_SIZE * 2)
 #define MAX_MOMENTUM 0xF
 #define MOMENTUM_INIT 0xF0000000
@@ -51,10 +53,9 @@ static __device__ void Swap (struct particle *, struct particle *);
 
 static __device__ int blocksComplete = 0;
 
-
 extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 					 unsigned int *transblock_buffers,
-					 unsigned int *buffer_flags,
+					 unsigned int *buffer_count,
 					 unsigned long size)
 {
 	/* define shared memory */
@@ -65,20 +66,29 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 	__shared__ unsigned int right_outgoing [BUFFER_SIZE];
 	__shared__ unsigned int isNotComplete;
 	__shared__ unsigned int wasComplete;
-	__shared__ unsigned int *cur_left_incoming, *cur_left_outgoing;
-	__shared__ unsigned int *cur_right_incoming, *cur_right_outgoing;
+	__shared__ unsigned int cur_L_incoming_written, cur_L_incoming_read;
+	__shared__ unsigned int cur_L_outgoing_written, cur_L_outgoing_read;
+	__shared__ unsigned int cur_R_incoming_written, cur_R_incoming_read;
+	__shared__ unsigned int cur_R_outgoing_written, cur_R_outgoing_read;
+	__shared__ unsigned int global_L_buffer_read, global_R_buffer_read;
 
 
 	/* define registers */
 	const int absThreadID = blockIdx.x * blockDim.x + threadIdx.x;
 
-	/* these are only used by a couple of threads . . . */
 	if (threadIdx.x == 0) {
-		cur_left_incoming = left_incoming + BUFFER_SIZE - 1;
-		cur_left_outgoing = left_outgoing + BUFFER_SIZE - 1;
-		cur_right_incoming = right_incoming;
-		cur_right_outgoing = right_outgoing;
+		cur_L_incoming_written = cur_L_incoming_read = cur_L_outgoing_written = cur_L_outgoing_read =
+			cur_R_incoming_written = cur_R_incoming_read = cur_R_outgoing_written = cur_R_outgoing_read =
+			global_L_buffer_read = global_R_buffer_read = 0;
 	}
+	unsigned int *const global_left_incoming_buffer = transblock_buffers + (blockIdx.x-1) * _2XBUFFER_SIZE;
+	unsigned int *const global_left_outgoing_buffer = transblock_buffers + (blockIdx.x-1) * _2XBUFFER_SIZE + BUFFER_SIZE;
+	unsigned int *const global_right_outgoing_buffer = transblock_buffers + blockIdx.x * _2XBUFFER_SIZE;
+	unsigned int *const global_right_incoming_buffer = transblock_buffers + blockIdx.x * _2XBUFFER_SIZE + BUFFER_SIZE;
+	unsigned int *const global_left_incoming_counter = buffer_count + (blockIdx.x-1) * 2;
+	unsigned int *const global_left_outgoing_counter = buffer_count + (blockIdx.x-1) * 2 + 1;
+	unsigned int *const global_right_outgoing_counter = buffer_count + blockIdx.x * 2;
+	unsigned int *const global_right_incoming_counter = buffer_count + blockIdx.x * 2 + 1;
 	
 	struct particle going_left, going_right;
 
@@ -92,9 +102,9 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 	else role = MIDDLE;
 
 	enum {LBUFF, NONE, RBUFF} buff_role;
-	if ((blockIdx.x > 0) && (threadIdx.x < BUFFER_SIZE))
+	if ((blockIdx.x > 0) && (threadIdx.x < TRANSFER_SIZE))
 		buff_role = LBUFF;
-	else if ((blockIdx.x < gridDim.x - 1) && (threadIdx.x >= (blockDim.x - BUFFER_SIZE)))
+	else if ((blockIdx.x < gridDim.x - 1) && (threadIdx.x >= (blockDim.x - TRANSFER_SIZE)))
 		buff_role = RBUFF;
 	else buff_role = NONE;
 
@@ -153,11 +163,11 @@ do {
 			// prepare for moving right
 			switch (role) {
 			case LEFT:
-				*here = *(cur_left_incoming--);
+				if (cur_L_incoming_read < cur_L_incoming_written)
+					*here = left_incoming[cur_L_incoming_read++ & BUFFER_MOD];
 				break;
 			case RIGHT:
-				WriteParticle(&going_right, cur_right_outgoing);
-				++cur_right_outgoing;
+				WriteParticle(&going_right, right_outgoing + (cur_R_outgoing_written++ & BUFFER_MOD));
 				break;
 			case BEGINNING:
 				if (going_left.color)
@@ -188,11 +198,11 @@ do {
 			// prepare for moving left
 			switch (role) {
 			case LEFT:
-				WriteParticle(&going_left, cur_left_outgoing);
-				--cur_left_outgoing;
+				WriteParticle(&going_left, left_outgoing + (cur_L_outgoing_written++ & BUFFER_MOD));
 				break;
 			case RIGHT:
-				*here = *(cur_right_incoming++);
+				if (cur_R_incoming_read < cur_R_incoming_written)
+					*here = right_incoming[cur_R_incoming_read++ & BUFFER_MOD];
 				break;
 			case END:
 				if (going_right.color)
@@ -213,30 +223,31 @@ do {
 		}
 		if ((++i & 0xF) == 0) {
 			switch (buff_role) {
-			case LBUFF:
-				while (buffer_flags[(blockIdx.x-1) * 2 + 1]); /*busy wait*/ 
-				left_incoming[threadIdx.x] = transblock_buffers[(blockIdx.x-1)*_2XBUFFER_SIZE+threadIdx.x];
-				transblock_buffers[(blockIdx.x-1)*_2XBUFFER_SIZE+threadIdx.x] = 0;
-				transblock_buffers[(blockIdx.x-1)*_2XBUFFER_SIZE+BUFFER_SIZE+threadIdx.x] = left_outgoing[threadIdx.x];
-				atomicExch(buffer_flags + (blockIdx.x-1) * 2 + 1, 1);
-				atomicExch(buffer_flags + (blockIdx.x-1) * 2, 0);
+			case LBUFF:		
+				global_left_outgoing_buffer[(*global_left_outgoing_counter + threadIdx.x) & BUFFER_MOD]
+					= left_outgoing[(cur_L_outgoing_written - TRANSFER_SIZE + 1 + threadIdx.x) & BUFFER_MOD];
+				if (role == LEFT)
+					atomicAdd(global_left_outgoing_counter, TRANSFER_SIZE);
+				if (*global_left_incoming_counter > cur_L_incoming_written) {
+					left_incoming[(cur_L_incoming_written+threadIdx.x)&BUFFER_MOD]
+						= global_left_incoming_buffer[(*global_left_incoming_counter-TRANSFER_SIZE+1+threadIdx.x)&BUFFER_MOD];
+					if (role == LEFT)
+						cur_L_incoming_written += TRANSFER_SIZE;
+				}
 				break;
 			case RBUFF:
-				while (buffer_flags[blockIdx.x * 2]); /*busy wait*/
-				transblock_buffers[blockIdx.x*_2XBUFFER_SIZE+threadIdx.x-blockDim.x+BUFFER_SIZE] = right_outgoing[threadIdx.x-blockDim.x+BUFFER_SIZE];
-				right_incoming[threadIdx.x-blockDim.x+BUFFER_SIZE] =
-					transblock_buffers[blockIdx.x*_2XBUFFER_SIZE+BUFFER_SIZE+threadIdx.x-blockDim.x+BUFFER_SIZE];
-				transblock_buffers[blockIdx.x*_2XBUFFER_SIZE+BUFFER_SIZE+threadIdx.x-blockDim.x+BUFFER_SIZE] = 0;
-				atomicExch(buffer_flags + blockIdx.x * 2, 1);
-				atomicExch(buffer_flags + blockIdx.x * 2 + 1, 0);
+				global_right_outgoing_buffer[(*global_right_outgoing_counter-blockDim.x+TRANSFER_SIZE+threadIdx.x)&BUFFER_MOD]
+					= left_outgoing[(cur_R_outgoing_written-TRANSFER_SIZE+1-blockDim.x+TRANSFER_SIZE+threadIdx.x)&BUFFER_MOD];
+				if (role == RIGHT)
+					atomicAdd(global_right_outgoing_counter, 1);
+				if (*global_right_incoming_counter > cur_R_incoming_written) {
+					right_incoming[(cur_R_incoming_written-blockDim.x+TRANSFER_SIZE+threadIdx.x)&BUFFER_MOD]
+						= global_right_incoming_buffer[(*global_right_incoming_counter-TRANSFER_SIZE+1+threadIdx.x)&BUFFER_MOD];
+					if (role == RIGHT)
+						cur_R_incoming_written += TRANSFER_SIZE;
+				}
 				break;
 			}	
-			if (threadIdx.x == 0) {
-				cur_left_incoming = left_incoming + BUFFER_SIZE - 1;
-				cur_left_outgoing = left_outgoing + BUFFER_SIZE - 1;
-				cur_right_incoming = right_incoming;
-				cur_right_outgoing = right_outgoing;
-			}
 		}
 		__syncthreads();
 	} while (isNotComplete);
