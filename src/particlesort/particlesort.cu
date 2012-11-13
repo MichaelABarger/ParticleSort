@@ -20,7 +20,7 @@
 #define BLOCK 416
 #define BUFFER_SIZE 256
 #define TRANSFER_SIZE 16
-#define BUFFER_MOD 255
+#define BUFFER_MOD 0xFF
 #define _2XBUFFER_SIZE (BUFFER_SIZE * 2)
 #define MAX_MOMENTUM 0xF
 #define MOMENTUM_INIT 0xF0000000
@@ -52,6 +52,13 @@ static __device__ void Reside (struct particle *, unsigned int *);
 static __device__ void Swap (struct particle *, struct particle *);
 
 static __device__ int blocksComplete = 0;
+
+#ifdef DEBUG
+#define TEST_ITER 3
+	__device__ unsigned int buffer_snapshot [TEST_ITER][_2XBUFFER_SIZE];
+	__device__ int iter = 0; 
+	__device__ int buffer_read = 0;
+#endif
 
 extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 					 unsigned int *transblock_buffers,
@@ -163,6 +170,9 @@ do {
 			case LEFT:
 				if (cur_L_incoming_read < cur_L_incoming_written)
 					*here = left_incoming[cur_L_incoming_read++ & BUFFER_MOD];
+#ifdef DEBUG
+				atomicAdd(&buffer_read, 1);
+#endif
 				break;
 			case RIGHT:
 				WriteParticle(&going_right, right_outgoing + (cur_R_outgoing_written++ & BUFFER_MOD));
@@ -201,6 +211,9 @@ do {
 			case RIGHT:
 				if (cur_R_incoming_read < cur_R_incoming_written)
 					*here = right_incoming[cur_R_incoming_read++ & BUFFER_MOD];
+#ifdef DEBUG
+				atomicAdd(&buffer_read, 1);
+#endif
 				break;
 			case END:
 				if (going_right.color)
@@ -235,9 +248,16 @@ do {
 				break;
 			case RBUFF:
 				global_right_outgoing_buffer[(*global_right_outgoing_counter-blockDim.x+TRANSFER_SIZE+threadIdx.x)&BUFFER_MOD]
-					= left_outgoing[(cur_R_outgoing_written-TRANSFER_SIZE+1-blockDim.x+TRANSFER_SIZE+threadIdx.x)&BUFFER_MOD];
+					= right_outgoing[(cur_R_outgoing_written-TRANSFER_SIZE+1-blockDim.x+TRANSFER_SIZE+threadIdx.x)&BUFFER_MOD];
 				if (role == RIGHT)
 					atomicAdd(global_right_outgoing_counter, TRANSFER_SIZE);
+#ifdef DEBUG
+				if (iter < TEST_ITER && role == RIGHT) {
+					for (int i = 0; i < _2XBUFFER_SIZE; i++)
+						buffer_snapshot[iter][i] = global_right_outgoing_buffer[i];
+					++iter;
+				}
+#endif
 				if (*global_right_incoming_counter > cur_R_incoming_written) {
 					right_incoming[(cur_R_incoming_written-blockDim.x+TRANSFER_SIZE+threadIdx.x)&BUFFER_MOD]
 						= global_right_incoming_buffer[(*global_right_incoming_counter-TRANSFER_SIZE+1+threadIdx.x)&BUFFER_MOD];
@@ -334,10 +354,28 @@ extern "C" void sort (unsigned int *buffer, unsigned long size)
 			"cudaMemcpy device->host");
 #ifdef DEBUG
 	unsigned int *buff_ct = (unsigned int *)malloc(buffer_flags_size);
+	int buffer_read;
+
 	cudaMemcpy(buff_ct, buffer_flags, buffer_flags_size, cudaMemcpyDeviceToHost);
 	fprintf(stderr, "Buffer 1 ct A: %u, ct B: %u\n", buff_ct[0], buff_ct[1]);
+	
+	cudaMemcpyFromSymbol(&buffer_read, "buffer_read", sizeof(int), 0, cudaMemcpyDeviceToHost);
+	fprintf(stderr, "Number of buffer reads: %i\n", buffer_read);
 
 	free(buff_ct);
+
+	unsigned int buffer_snapshot[TEST_ITER][_2XBUFFER_SIZE];
+	cudaMemcpyFromSymbol(buffer_snapshot, "buffer_snapshot", TEST_ITER * _2XBUFFER_SIZE * sizeof(int), 0, cudaMemcpyDeviceToHost);
+
+	for (int i = 0; i < TEST_ITER; i++) {
+		fprintf(stderr, "Step %i:\n[[", i);
+		for (int j = 0; j < BUFFER_SIZE; j++)
+			fprintf(stderr, "%u, ", buffer_snapshot[i][j] & COLOR_MASK);
+		fprintf(stderr, "]\n [");
+		for (int j = BUFFER_SIZE; j < _2XBUFFER_SIZE; j++)
+			fprintf(stderr, "%u, ", buffer_snapshot[i][j] & COLOR_MASK);
+		fprintf(stderr, "]\n\n");
+	}
 #endif
 
 	ErrorCheck(cudaFree(global_mem), "cudaFree global");
