@@ -11,14 +11,12 @@
 #ifndef PARTICLESORT_CU
 #define PARTICLESORT_CU
 
-#define DEBUG
-
 #include <cuda.h>
 #include <stdio.h>
 #include "../testharness/testharness.h"
 
 #define BLOCK 416
-#define BUFFER_SIZE 256
+#define BUFFER_SIZE BLOCK
 #define TRANSFER_SIZE 16
 #define BUFFER_MOD 0xFF
 #define _2XBUFFER_SIZE (BUFFER_SIZE * 2)
@@ -53,12 +51,6 @@ static __device__ void Swap (struct particle *, struct particle *);
 
 static __device__ int blocksComplete = 0;
 
-#ifdef DEBUG
-#define TEST_ITER 3
-	__device__ unsigned int buffer_snapshot [TEST_ITER][_2XBUFFER_SIZE];
-	__device__ int iter = 0; 
-	__device__ int buffer_read = 0;
-#endif
 
 extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 					 unsigned int *transblock_buffers,
@@ -122,7 +114,7 @@ extern "C" __global__ void ParticleSort (unsigned int *global_mem,
 	/* initial coalesced global memory read */
 	if (role != IDLE) {
 		resident = MOMENTUM_INIT | (global_mem[absThreadID] + 1);
-		if (threadIdx.x & 0x01 || role == END) {
+		if (threadIdx.x & 0x01 || role == END || role == RIGHT) {
 			ReadParticle(resident, &going_left);
 			resident = 0;
 		}
@@ -168,12 +160,11 @@ do {
 			// prepare for moving right
 			switch (role) {
 			case LEFT:
+				WriteParticle(&going_right, here + 1);
 				if (cur_L_incoming_read < cur_L_incoming_written)
 					*here = left_incoming[cur_L_incoming_read++ & BUFFER_MOD];
-				WriteParticle(&going_right, here + 1);
-#ifdef DEBUG
-				atomicAdd(&buffer_read, 1);
-#endif
+				else
+					*here = 0;
 				break;
 			case RIGHT:
 				WriteParticle(&going_right, right_outgoing + (cur_R_outgoing_written++ & BUFFER_MOD));
@@ -212,12 +203,11 @@ do {
 				RESET(going_left);
 				break;
 			case RIGHT:
+				WriteParticle(&going_left, here - 1);
 				if (cur_R_incoming_read < cur_R_incoming_written) 
 					*here = right_incoming[cur_R_incoming_read++ & BUFFER_MOD];
-				WriteParticle(&going_left, here - 1);
-#ifdef DEBUG
-				atomicAdd(&buffer_read, 1);
-#endif
+				else
+					*here = 0;
 				break;
 			case END:
 				if (going_right.color)
@@ -236,11 +226,12 @@ do {
 				atomicAdd(&blocksComplete, -1);
 			}
 		}
+		__syncthreads();
 		if ((++i & 0x1F) == 0) {
 			switch (buff_role) {
 			case LBUFF:		
-				global_left_outgoing_buffer[(*global_left_outgoing_counter + threadIdx.x) & BUFFER_MOD]
-					= left_outgoing[(cur_L_outgoing_written - TRANSFER_SIZE + 1 + threadIdx.x) & BUFFER_MOD];
+				global_left_outgoing_buffer[(*global_left_outgoing_counter+threadIdx.x)&BUFFER_MOD]
+					= left_outgoing[(cur_L_outgoing_written-TRANSFER_SIZE+1+threadIdx.x)&BUFFER_MOD];
 				if (role == LEFT) 
 					atomicAdd(global_left_outgoing_counter, TRANSFER_SIZE);
 				if (*global_left_incoming_counter > cur_L_incoming_written) {
@@ -255,13 +246,6 @@ do {
 					= right_outgoing[(cur_R_outgoing_written-TRANSFER_SIZE+1-blockDim.x+TRANSFER_SIZE+threadIdx.x)&BUFFER_MOD];
 				if (role == RIGHT)
 					atomicAdd(global_right_outgoing_counter, TRANSFER_SIZE);
-#ifdef DEBUG
-				if (iter < TEST_ITER && role == RIGHT) {
-					for (int i = 0; i < _2XBUFFER_SIZE; i++)
-						buffer_snapshot[iter][i] = global_right_outgoing_buffer[i];
-					++iter;
-				}
-#endif
 				if (*global_right_incoming_counter > cur_R_incoming_written) {
 					right_incoming[(cur_R_incoming_written-blockDim.x+TRANSFER_SIZE+threadIdx.x)&BUFFER_MOD]
 						= global_right_incoming_buffer[(*global_right_incoming_counter-TRANSFER_SIZE+1+threadIdx.x)&BUFFER_MOD];
@@ -356,31 +340,6 @@ extern "C" void sort (unsigned int *buffer, unsigned long size)
 	ParticleSort<<<grid, block>>>(global_mem, transblock_buffers, buffer_flags, size);
 	ErrorCheck(cudaMemcpy(buffer, global_mem, global_mem_size, cudaMemcpyDeviceToHost),
 			"cudaMemcpy device->host");
-#ifdef DEBUG
-	unsigned int *buff_ct = (unsigned int *)malloc(buffer_flags_size);
-	int buffer_read;
-
-	cudaMemcpy(buff_ct, buffer_flags, buffer_flags_size, cudaMemcpyDeviceToHost);
-	fprintf(stderr, "Buffer 1 ct A: %u, ct B: %u\n", buff_ct[0], buff_ct[1]);
-	
-	cudaMemcpyFromSymbol(&buffer_read, "buffer_read", sizeof(int), 0, cudaMemcpyDeviceToHost);
-	fprintf(stderr, "Number of buffer reads: %i\n", buffer_read);
-
-	free(buff_ct);
-
-	unsigned int buffer_snapshot[TEST_ITER][_2XBUFFER_SIZE];
-	cudaMemcpyFromSymbol(buffer_snapshot, "buffer_snapshot", TEST_ITER * _2XBUFFER_SIZE * sizeof(int), 0, cudaMemcpyDeviceToHost);
-
-	for (int i = 0; i < TEST_ITER; i++) {
-		fprintf(stderr, "Step %i:\n[[", i);
-		for (int j = 0; j < BUFFER_SIZE; j++)
-			fprintf(stderr, "%u, ", buffer_snapshot[i][j] & COLOR_MASK);
-		fprintf(stderr, "]\n [");
-		for (int j = BUFFER_SIZE; j < _2XBUFFER_SIZE; j++)
-			fprintf(stderr, "%u, ", buffer_snapshot[i][j] & COLOR_MASK);
-		fprintf(stderr, "]\n\n");
-	}
-#endif
 
 	ErrorCheck(cudaFree(global_mem), "cudaFree global");
 	ErrorCheck(cudaFree(transblock_buffers), "cudaFree buffers");
